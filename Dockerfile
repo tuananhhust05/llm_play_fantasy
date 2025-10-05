@@ -1,6 +1,10 @@
 # Sử dụng base image Python
 FROM python:3.10-slim
 
+# >>> THÊM DÒNG NÀY VÀO <<<
+# Cài đặt các công cụ build cần thiết như gcc, g++
+RUN apt-get update && apt-get install -y build-essential
+
 # Thiết lập thư mục làm việc
 WORKDIR /app
 
