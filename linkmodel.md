@@ -1,0 +1,1 @@
+https://huggingface.co/mradermacher/Qwen1.5-1.8B-Chat-GGUF/tree/main
