@@ -18,65 +18,143 @@ class SynthesisResponse(BaseModel):
 # 2. LLM LOGIC HANDLING
 # ========================
 
-# Global variable to hold the model, loaded only once on startup
 llm = None
 
 def load_model():
     """Loads the LLM model from a GGUF file."""
     global llm
-    # Get model path from environment variable, use default if not set
     model_path = os.getenv("MODEL_PATH", "/app/models/qwen1.5-1.5b-chat.Q4_K_M.gguf")
     
     if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model file not found at: {model_path}. Please ensure you have downloaded the model into the 'models' directory.")
+        raise FileNotFoundError(f"Model file not found at: {model_path}.")
 
     print(f"Starting to load model from: {model_path}...")
     llm = Llama(
         model_path=model_path,
-        n_ctx=4096,      # Maximum context length
-        n_gpu_layers=0,  # Run on CPU only
-        n_threads=4,     # Number of CPU cores to use
+        n_ctx=8192,  # Giữ nguyên context window lớn như đã yêu cầu
+        n_gpu_layers=0,
+        n_threads=4,
         verbose=True,
     )
     print("Model loaded successfully!")
 
-def synthesize_articles(articles: list[str]) -> str:
-    """Creates a prompt, sends it to the LLM, and returns the synthesized result."""
+# --- HÀM MỚI ĐỂ CHIA NHỎ VĂN BẢN ---
+def chunk_text(text: str, chunk_size_chars: int):
+    """
+    Chia một văn bản dài thành các đoạn nhỏ hơn, ưu tiên ngắt ở cuối đoạn văn.
+    """
+    paragraphs = text.split('\n\n')
+    chunks = []
+    current_chunk = ""
+
+    for p in paragraphs:
+        # Nếu thêm đoạn văn này vào chunk hiện tại sẽ vượt quá giới hạn
+        if len(current_chunk) + len(p) + 2 > chunk_size_chars:
+            if current_chunk:  # Thêm chunk hiện tại vào danh sách nếu nó không rỗng
+                chunks.append(current_chunk)
+            current_chunk = p
+        else:
+            # Nối đoạn văn vào chunk hiện tại
+            if current_chunk:
+                current_chunk += "\n\n" + p
+            else:
+                current_chunk = p
+    
+    if current_chunk:  # Thêm chunk cuối cùng còn lại vào danh sách
+        chunks.append(current_chunk)
+        
+    return chunks
+# --- KẾT THÚC HÀM MỚI ---
+
+
+def extract_key_points_from_article(article: str) -> str:
+    """
+    Step 1: Processes a SINGLE article (or a chunk) to extract structured key points.
+    """
+    prompt = f"""
+<|im_start|>system
+You are a research assistant. Your task is to read the following sports article and extract the most important facts and talking points in a structured list format. Focus on key events, player performances, and tactical analysis.
+<|im_end|>
+<|im_start|>user
+Here is the article:
+
+{article}
+
+Extract the key points from this article.
+<|im_end|>
+<|im_start|>assistant
+"""
+    print(f"Extracting key points from text block snippet: '{article[:100]}...'")
+    output = llm(
+        prompt,
+        max_tokens=512,
+        temperature=0.2,
+        stop=["<|im_end|>"],
+        echo=False
+    )
+    return output['choices'][0]['text'].strip()
+
+def detailed_synthesis(articles: list[str]) -> str:
+    """
+    Takes the extracted key points and synthesizes the final, detailed article.
+    """
     if not llm:
         raise RuntimeError("Model is not loaded.")
 
-    # Create the combined text from the list of articles
-    articles_text = ""
-    for i, article in enumerate(articles, 1):
-        articles_text += f"--- SOURCE ARTICLE {i} ---\n{article}\n\n"
+    # --- LOGIC CHIA NHỎ (CHUNKING) ĐƯỢC THÊM VÀO ĐÂY ---
+    # Ước tính kích thước chunk an toàn, nhỏ hơn n_ctx một chút.
+    # Giả sử 1 token ~ 4 ký tự, để an toàn ta dùng hệ số 3.
+    CHUNK_SIZE_CHARS = llm.n_ctx() * 3 
 
-    # Define the new, detailed English prompt
-    prompt = f"""
+    processed_texts = []
+    for article in articles:
+        if len(article) > CHUNK_SIZE_CHARS:
+            print(f"Article is too long ({len(article)} chars), chunking it...")
+            chunks = chunk_text(article, CHUNK_SIZE_CHARS)
+            processed_texts.extend(chunks)
+            print(f"Split into {len(chunks)} chunks.")
+        else:
+            # Nếu bài báo không quá dài, giữ nguyên nó
+            processed_texts.append(article)
+    # --- KẾT THÚC LOGIC CHIA NHỎ ---
+
+    # Step 1: Map - Trích xuất ý chính từ mỗi bài báo HOẶC MỖI ĐOẠN NHỎ
+    all_key_points = []
+    for text_block in processed_texts: # <-- Dùng danh sách đã được xử lý
+        points = extract_key_points_from_article(text_block)
+        all_key_points.append(points)
+
+    combined_points = "\n\n---\n\n".join(all_key_points)
+
+    # Step 2: Reduce - Dùng các ý chính đã trích xuất để viết bài báo cuối cùng
+    final_prompt = f"""
 <|im_start|>system
-You are an expert sports editor and journalist. Your mission is to synthesize the key information, facts, and analyses from the multiple provided articles about the same sports match. Your goal is to craft a single, comprehensive, and impressive news article that is more detailed and better structured than any of the source articles.
+You are an expert sports editor and journalist. Your mission is to use the following collection of key points, extracted from multiple sources, to write a single, comprehensive, and impressive news article about the match.
 
-CRITICAL INSTRUCTION: Your response MUST ONLY contain the content of the synthesized article. Do not include any preambles, headings, or conversational text like 'Here is the synthesized article:'. Your response must begin directly with the article's first sentence.
+Your article must be well-structured with clear paragraphs, engaging, and more detailed than a simple summary. Weave the facts and analyses together into a compelling narrative.
+
+CRITICAL INSTRUCTION: Your response MUST ONLY contain the content of the synthesized article. Do not include any preambles, headings, or conversational text. Your response must begin directly with the article's first sentence.
 <|im_end|>
 <|im_start|>user
-Here are the source articles to synthesize:
+Here are the key points to use for the article:
 
-{articles_text}
-Now, write the complete, final article based on the information provided above.
+{combined_points}
+
+Now, write the complete, final article based on this information.
 <|im_end|>
 <|im_start|>assistant
 """
     
-    # Send the request to the LLM
-    print("Sending synthesis request to LLM...")
+    print("Sending final synthesis request to LLM with combined key points...")
     output = llm(
-        prompt,
-        max_tokens=1024,
+        final_prompt,
+        max_tokens=2048,
         temperature=0.7,
-        stop=["<|im_end|>"], # Stop generating text when this token is encountered
+        stop=["<|im_end|>"],
         echo=False
     )
     
-    print("LLM has responded.")
+    print("LLM has responded with the final article.")
     return output['choices'][0]['text'].strip()
 
 
@@ -85,33 +163,30 @@ Now, write the complete, final article based on the information provided above.
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Code to run on server startup: Load the model into RAM
     load_model()
     yield
-    # Code to run on server shutdown (for cleanup if needed)
     print("Server is shutting down.")
 
-# Initialize FastAPI app
 app = FastAPI(
-    title="Article Synthesis API",
-    description="An API using Qwen-1.5B to synthesize multiple articles into one.",
+    title="Advanced Article Synthesis API",
+    description="An API using a two-step process with chunking to synthesize detailed articles.",
     lifespan=lifespan
 )
 
 @app.get("/", tags=["Health Check"])
 def health_check():
-    """Check if the API is running and the model is loaded."""
     return {"status": "ok", "model_loaded": llm is not None}
 
 @app.post("/synthesize", response_model=SynthesisResponse, tags=["Core"])
 def synthesize_endpoint(request: SynthesisRequest):
-    """Receives a list of articles and returns a single synthesized article."""
+    """Receives articles and returns a single, detailed, synthesized article."""
     if not request.articles or not all(isinstance(a, str) for a in request.articles):
-        raise HTTPException(status_code=400, detail="Input must be a list of strings (articles).")
+        raise HTTPException(status_code=400, detail="Input must be a list of strings.")
 
     try:
-        summary = synthesize_articles(request.articles)
+        summary = detailed_synthesis(request.articles)
         return SynthesisResponse(summary=summary)
     except Exception as e:
         print(f"Processing error: {e}")
-        raise HTTPException(status_code=500, detail="An error occurred during the synthesis process.")
+        raise HTTPException(status_code=500, detail="An error occurred during synthesis.")
+
