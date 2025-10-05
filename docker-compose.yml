@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: football-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+    restart: unless-stopped
+    environment:
+      - MODEL_PATH=/app/models/qwen1.5-1.5b-chat.Q4_K_M.gguf
